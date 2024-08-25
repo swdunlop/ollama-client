@@ -15,7 +15,11 @@ import (
 
 // With creates a new Ollama client or expands the previous one in a context.
 func With(ctx context.Context, options ...Option) context.Context {
-	panic(`TODO`)
+	client := *from(ctx)
+	for _, option := range options {
+		option(&client)
+	}
+	return context.WithValue(ctx, ctxClient{}, client)
 }
 
 // Chat does a chat request with the provided context.  Note that this does not handle a streaming result

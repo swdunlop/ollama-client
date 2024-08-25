@@ -46,40 +46,17 @@ func Message(role Role, content string, options ...message.Option) Option {
 	}
 }
 
-// Toolkit adds a set of tools that the model may call.  If used, the model may call tools as desired and the
-// conversation will conclude only once the model has stopped calling tools.
-//
-// This is convenient, but for manual control, you may want to use the toolkit package directly or the tool package.
-func Toolkit(tools ...Tool) Option {
+// Toolkit is identical to Tools.
+func Toolkit(toolkit toolkit.Interface) Option {
 	return func(r *Request) {
+		tools := toolkit.Tools()
 		for _, tool := range tools {
 			r.Tools = append(r.Tools, tool.Tool())
 		}
-		tk := toolkit.New(tools...)
-		// TODO: move this to toolkit.Hook ?
-		r.hook(func(ctx context.Context, messages ...protocol.Message) ([]protocol.Message, error) {
-			if len(messages) == 0 {
-				return messages, nil // weird, but I'll allow it
-			}
-			last := messages[len(messages)-1]
-			for _, call := range last.ToolCalls {
-				ret, err := tk.Call(ctx, call)
-				if err != nil {
-					// TODO: does it make more sense to return these errors? should we gather all the errors? what do users expect?
-					return nil, err
-				}
-				messages = append(messages, ret)
-			}
-			if len(last.ToolCalls) > 0 {
-				return messages, Continue{}
-			}
-			return messages, nil
-		})
 	}
 }
 
-// Tools adds tools that the model may call, but will not handle the calls directly.  This is an alternative to the more
-// convenient but less controllable Toolkit.
+// Tools adds tools that the model may call.
 func Tools(tools ...Tool) Option {
 	return func(r *Request) {
 		for _, tool := range tools {
@@ -90,13 +67,6 @@ func Tools(tools ...Tool) Option {
 
 // Tool is an alias to the tool interface.
 type Tool = tool.Interface
-
-// Hook adds a function that is called after a response is received to react when a new message is returned by the model.  This function
-// can rewrite the messages and ask for the client to send the request again with the new set of messages by returning the special
-// Continue error.  This is used by Toolkit to automatically call tools as desired by the model.
-func Hook(hook func(ctx context.Context, messages ...protocol.Message) ([]protocol.Message, error)) Option {
-	return func(r *Request) { r.hook(hook) }
-}
 
 // Temperature affects how random the response may be.  A 0.0 temperature should effectively avoid any deviation from the most probable
 // response.  A 1.0 temperature affords some variation in responses.
@@ -135,8 +105,3 @@ func (r *Request) hook(hook func(ctx context.Context, messages ...protocol.Messa
 type Response = protocol.Response
 
 // https://github.com/ollama/ollama/blob/main/docs/api.md#generate-a-chat-completion
-
-// Continue may be returned by a hook to tell the client to repeat the request after applying hooks.
-type Continue struct{}
-
-func (Continue) Error() string { return `please continue` }

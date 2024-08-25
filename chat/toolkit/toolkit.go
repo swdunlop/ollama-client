@@ -13,16 +13,18 @@ import (
 // New constructs a new toolkit from the provided tools.
 func New(tools ...Tool) Interface {
 	tk := new(toolkit)
-	tk.tools = make(map[string]tool.Interface, len(tools))
+	tk.list = append([]Tool(nil), tools...)
+	tk.table = make(map[string]tool.Interface, len(tools))
 	for _, tool := range tools {
 		// TODO: nag about duplicates?
-		tk.tools[tool.Tool().Function.Name] = tool
+		tk.table[tool.Tool().Function.Name] = tool
 	}
 	return tk
 }
 
 type toolkit struct {
-	tools map[string]Tool
+	list  []Tool
+	table map[string]Tool
 }
 
 // Call calls a tool from the toolkit.
@@ -41,7 +43,7 @@ func (tk *toolkit) Call(ctx context.Context, call protocol.ToolCall) (ret protoc
 		err = fmt.Errorf(`only tool function calls are supported`)
 		return
 	}
-	tool := tk.tools[call.Function.Name]
+	tool := tk.table[call.Function.Name]
 	if tool == nil {
 		err = fmt.Errorf(`tool %q not found`, call.Function.Name)
 		return
@@ -54,11 +56,18 @@ func (tk *toolkit) Call(ctx context.Context, call protocol.ToolCall) (ret protoc
 	return
 }
 
+func (tk *toolkit) Tools() []Tool {
+	return append([]Tool(nil), tk.list...)
+}
+
 // Interface describes the toolkit interface.
 type Interface interface {
 	// Call will call the requested tool, if it exists.  It will return an error if the tool did not exist, or if
 	// the tool itself returned an error.
 	Call(ctx context.Context, call protocol.ToolCall) (protocol.Message, error)
+
+	// Tools returns a list of the tools supported by the toolkit.
+	Tools() []Tool
 }
 
 type Tool = tool.Interface

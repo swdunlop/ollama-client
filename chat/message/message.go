@@ -29,19 +29,5 @@ func PNG(png []byte) Option {
 	}
 }
 
-// A Tool specifies a tool that can be called by the model.
-func Tool() Option {
-	return func(m *protocol.Message) {
-		panic(`TODO`)
-	}
-}
-
-// A Toolset specifies a set of tools that can be called by the model.
-func Toolset() Option {
-	return func(m *protocol.Message) {
-		panic(`TODO`)
-	}
-}
-
 // An Option improves a message when applied to it.
 type Option func(*protocol.Message)
