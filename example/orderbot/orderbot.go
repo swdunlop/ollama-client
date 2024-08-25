@@ -3,13 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -25,6 +25,7 @@ import (
 func main() {
 	flag.BoolVar(&trace, `trace`, false, `trace HTTP requests`)
 	flag.BoolVar(&trace, `json`, false, `trace HTTP requests`)
+	flag.StringVar(&model, `model`, model, `name of ollama model to use, including tag`)
 	flag.Parse()
 	err := run()
 	if err != nil {
@@ -55,11 +56,6 @@ func run() error {
 	}
 	ctx = ollama.With(ctx, options...)
 
-	err := loadOrders()
-	if err != nil {
-		return err
-	}
-
 	findOrdersTool, err := tool.New(
 		tool.Description(`Finds orders, applying various search parameters.`),
 		tool.Func(findOrders),
@@ -71,13 +67,13 @@ func run() error {
 	}
 
 	ret, err := ollama.Chat(ctx,
-		chat.Model(`mistral-nemo:12b-instruct-2407-q8_0`),
+		chat.Model(model),
 		chat.Temperature(0), // Do not imagine my food!
 		chat.System(`Assist the user with inquiries about product orders using the provided tools.`+
 			` Only use the tools provided, do not attempt to provide information that is not available.`,
 		),
 		chat.Toolkit(tk),
-		chat.User(strings.Join(os.Args[1:], " ")),
+		chat.User(strings.Join(flag.Args(), " ")),
 	)
 
 	if err != nil {
@@ -96,6 +92,9 @@ func run() error {
 var (
 	trace      = false
 	outputJSON = false
+	model      = `llama3.1:8b-instruct-q6_K`
+	// model      = `llama3.1:latest` is a lower q4 quant and seems to suffer a little from that.
+	// model = `mistral-nemo:12b-instruct-2407-q8_0`
 )
 
 func findOrders(ctx context.Context, q struct {
@@ -141,20 +140,16 @@ func where[T any](seq []T, test func(T) bool) []T {
 	return ret
 }
 
-func loadOrders() error {
-	data, err := os.ReadFile(filepath.Join(`example`, `orders.json`))
-	if err != nil {
-		return err
-	}
-	dec := json.NewDecoder(bytes.NewReader(data))
+func init() {
+	dec := json.NewDecoder(bytes.NewReader(ordersJSON))
 	for {
 		var order Order
 		err := dec.Decode(&order)
 		if err == io.EOF {
-			return nil
+			return
 		}
 		if err != nil {
-			return err
+			panic(err)
 		}
 		orders = append(orders, order)
 	}
@@ -178,3 +173,6 @@ func (t Time) Time() time.Time {
 	}
 	return date.Time
 }
+
+//go:embed orders.json
+var ordersJSON []byte
