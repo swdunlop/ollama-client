@@ -138,7 +138,7 @@ func (r *bodyThief) Read(p []byte) (int, error) {
 }
 
 // RequestHook adds a request hook to the client; each request hook is applied to a request by the Do client method.
-// This is useful for injecting authentication headers or logging.  They are pplied in First In First Out (FIFO) order.
+// This is useful for injecting authentication headers or logging.  They are applied in First In First Out (FIFO) order.
 func RequestHook(hook func(*http.Request) error) Option {
 	return func(ct *Client) { ct.requestHooks = append(ct.requestHooks, hook) }
 }
@@ -149,20 +149,27 @@ func ResponseHook(hook func(*http.Response) error) Option {
 	return func(ct *Client) { ct.responseHooks = append(ct.responseHooks, hook) }
 }
 
+// Host specifies the base URL of the Ollama server.  This may be either a URL without a trailing "/" or a TCP/IP address,
+// in which case, HTTP will be used.  The default host is `http://localhost:11434` but if OLLAMA_HOST is present in the
+// environment, it will be used instead.
+func Host(host string) Option {
+	return func(ct *Client) { ct.ollamaHost = host }
+}
+
 type Option func(*Client)
 
 type Client struct {
-	// OllamaHost is the base URL of the Ollama server.  This should not have a trailing "/".  An address can be used, or
+	// ollamaHost is the base URL of the Ollama server.  This should not have a trailing "/".  An address can be used, or
 	// a URL.
-	OllamaHost string `json:"ollama_host" env:"OLLAMA_HOST" default:"http://localhost:11434"`
+	ollamaHost string
 
 	requestHooks  []func(*http.Request) error
 	responseHooks []func(*http.Response) error
 }
 
 var defaultClient = func() (ct Client) {
-	if ct.OllamaHost = os.Getenv(`OLLAMA_HOST`); ct.OllamaHost == `` {
-		ct.OllamaHost = "http://localhost:11434"
+	if ct.ollamaHost = os.Getenv(`OLLAMA_HOST`); ct.ollamaHost == `` {
+		ct.ollamaHost = "http://localhost:11434"
 	}
 	return
 }()
@@ -179,7 +186,7 @@ func (ct *Client) Apply(options ...Option) *Client {
 
 // Do exchanges a Request for a Response or an error.
 func (ct *Client) Do(ctx context.Context, rsp any, method string, req any, api string) error {
-	url := ct.OllamaHost
+	url := ct.ollamaHost
 	if strings.Contains(url, `://`) {
 		url = strings.TrimSuffix(url, `/`)
 	} else {
