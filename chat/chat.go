@@ -2,8 +2,6 @@
 package chat
 
 import (
-	"context"
-
 	"github.com/swdunlop/ollama-client/chat/message"
 	"github.com/swdunlop/ollama-client/chat/protocol"
 	"github.com/swdunlop/ollama-client/chat/tool"
@@ -49,9 +47,9 @@ func Message(role Role, content string, options ...message.Option) Option {
 // Toolkit is identical to Tools.
 func Toolkit(toolkit toolkit.Interface) Option {
 	return func(r *Request) {
-		tools := toolkit.Tools()
-		for _, tool := range tools {
+		for _, tool := range toolkit.Tools() {
 			r.Tools = append(r.Tools, tool.Tool())
+			r.toolkit = toolkit
 		}
 	}
 }
@@ -86,6 +84,7 @@ func requestOption(name string, value any) Option {
 // An Option affects the construction of a chat request.
 type Option func(*Request)
 
+// Role influences how the model treats the content of a message.
 type Role = protocol.Role
 
 // Request describes the structure of a chat request.  It is not generally necessary to construct this yourself,
@@ -93,12 +92,12 @@ type Role = protocol.Role
 type Request struct {
 	protocol.Request
 
-	hooks []func(ctx context.Context, messages ...protocol.Message) ([]protocol.Message, error)
+	toolkit toolkit.Interface
 }
 
-func (r *Request) hook(hook func(ctx context.Context, messages ...protocol.Message) ([]protocol.Message, error)) {
-	r.hooks = append(r.hooks, hook)
-}
+// Toolkit returns the toolkit interface bound by the toolkit option.  This is used by the client.Chat function to handle tool
+// calls in the response.
+func (req *Request) Toolkit() toolkit.Interface { return req.toolkit }
 
 // Request describes the structure of a chat request.  It is not generally necessary to construct this yourself,
 // instead, use the various options provided.

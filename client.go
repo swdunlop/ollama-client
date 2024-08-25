@@ -5,56 +5,64 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 
+	"github.com/rs/zerolog"
 	"github.com/swdunlop/ollama-client/chat"
 )
 
 // With creates a new Ollama client or expands the previous one in a context.
 func With(ctx context.Context, options ...Option) context.Context {
+	if len(options) == 0 {
+		return ctx
+	}
 	client := *from(ctx)
+	client.requestHooks = append([]func(*http.Request) error(nil), client.requestHooks...)
+	client.responseHooks = append([]func(*http.Response) error(nil), client.responseHooks...)
 	for _, option := range options {
 		option(&client)
 	}
-	return context.WithValue(ctx, ctxClient{}, client)
+	return context.WithValue(ctx, ctxClient{}, &client)
 }
 
-// Chat does a chat request with the provided context.  Note that this does not handle a streaming result
-// from chat.
+// Chat does a chat request with the provided context.  If a toolkit is provided for the request, it will be used to
+// handle any tool calls.
 func Chat(ctx context.Context, options ...chat.Option) (*chat.Response, error) {
-	return do[*chat.Request, *chat.Response](ctx, options...)
+	req := newRequest[chat.Request](options...)
+	toolkit := req.Toolkit()
+	for {
+		var rsp chat.Response
+		err := from(ctx).Do(ctx, &rsp, `POST`, req, `/api/chat`)
+		if err != nil {
+			return nil, err
+		}
+		if toolkit == nil || len(rsp.Message.ToolCalls) == 0 {
+			return &rsp, nil
+		}
+		for _, call := range rsp.Message.ToolCalls {
+			msg, err := toolkit.Call(ctx, call)
+			if err != nil {
+				return &rsp, err
+			}
+			req.Messages = append(req.Messages, msg)
+		}
+	}
 }
 
-func do[
-	ReqP interface {
-		*Req
-		Request
-	},
-	RspP interface {
-		*Rsp
-	},
+func newRequest[
 	Req any,
-	Rsp any,
-	Option ~func(ReqP),
-](
-	ctx context.Context, options ...Option,
-) (RspP, error) {
+	Option ~func(*Req),
+](options ...Option) *Req {
 	var req Req
 	for _, option := range options {
 		option(&req)
 	}
-	ret, err := Do(ctx, (ReqP)(&req))
-	if err != nil {
-		return nil, err
-	}
-	return ret.(*Rsp), nil
+	return &req
 }
-
-// Do does a request using the Ollama client from the current context or the default one.
-func Do(ctx context.Context, req Request) (any, error) { return from(ctx).Do(ctx, req) }
 
 // Default is the default client for contexts without their own specialized client.
 var Default = defaultClient
@@ -62,12 +70,94 @@ var Default = defaultClient
 // New constructs a new Client with the provided options.
 func New(options ...Option) *Client { return defaultClient.Apply(options...) }
 
+// TraceZerolog adds a zerolog trace using the provided logger that traces requests and responses.
+func TraceZerolog(logger zerolog.Logger) Option {
+	return func(ct *Client) {
+		ct.requestHooks = append(ct.requestHooks, func(req *http.Request) error {
+			logger.Trace().Func(func(e *zerolog.Event) {
+				e.Str(`method`, req.Method).Stringer(`url`, req.URL)
+				body := stealBody(&req.Body)
+				var msg json.RawMessage
+				if err := json.Unmarshal(body, &msg); err == nil {
+					e.RawJSON(`request`, msg)
+				}
+			}).Msg(`sending Ollama request`)
+			return nil
+		})
+		ct.responseHooks = append(ct.responseHooks, func(rsp *http.Response) error {
+			req := rsp.Request
+			logger.Trace().Func(func(e *zerolog.Event) {
+				e.Str(`method`, req.Method).Stringer(`url`, req.URL).Int(`status`, rsp.StatusCode)
+				body := stealBody(&req.Body)
+				var msg json.RawMessage
+				if err := json.Unmarshal(body, &msg); err == nil {
+					e.RawJSON(`response`, msg)
+				}
+			}).Msg(`received Ollama response`)
+			return nil
+		})
+	}
+}
+
+func stealBody(rr *io.ReadCloser) []byte {
+	var body []byte
+	var err error
+	switch r := (*rr).(type) {
+	case nil:
+		return nil
+	case interface {
+		io.ReadCloser
+		Bytes() []byte
+	}:
+		body = r.Bytes()
+		_ = r.Close()
+	default:
+		body, err = io.ReadAll(r)
+	}
+	if err != nil {
+		panic(err) // TODO: shim in a reader that returns an error.
+	}
+	var bt bodyThief
+	bt.Write(body)
+	*rr = &bt
+	return body
+}
+
+type bodyThief struct {
+	bytes.Buffer
+	err error
+}
+
+func (r *bodyThief) Close() error { return nil }
+func (r *bodyThief) Read(p []byte) (int, error) {
+	n, err := r.Buffer.Read(p)
+	if err != nil && r.err != nil {
+		err = r.err
+	}
+	return n, err
+}
+
+// RequestHook adds a request hook to the client; each request hook is applied to a request by the Do client method.
+// This is useful for injecting authentication headers or logging.  They are pplied in First In First Out (FIFO) order.
+func RequestHook(hook func(*http.Request) error) Option {
+	return func(ct *Client) { ct.requestHooks = append(ct.requestHooks, hook) }
+}
+
+// ResponseHook adds a response hook to the client; like request hooks, these hooks are applied to responses by the Do client
+// method, but unlike RequestHooks, they are applied in Last In First Out (LIFO) order.
+func ResponseHook(hook func(*http.Response) error) Option {
+	return func(ct *Client) { ct.responseHooks = append(ct.responseHooks, hook) }
+}
+
 type Option func(*Client)
 
 type Client struct {
 	// OllamaHost is the base URL of the Ollama server.  This should not have a trailing "/".  An address can be used, or
 	// a URL.
 	OllamaHost string `json:"ollama_host" env:"OLLAMA_HOST" default:"http://localhost:11434"`
+
+	requestHooks  []func(*http.Request) error
+	responseHooks []func(*http.Response) error
 }
 
 var defaultClient = func() (ct Client) {
@@ -88,14 +178,13 @@ func (ct *Client) Apply(options ...Option) *Client {
 }
 
 // Do exchanges a Request for a Response or an error.
-func (ct *Client) Do(ctx context.Context, req Request) (any, error) {
+func (ct *Client) Do(ctx context.Context, rsp any, method string, req any, api string) error {
 	url := ct.OllamaHost
 	if strings.Contains(url, `://`) {
 		url = strings.TrimSuffix(url, `/`)
 	} else {
 		url = `http://` + url
 	}
-	method, api := req.OllamaAPI()
 	url += api
 
 	var hreq *http.Request
@@ -103,46 +192,71 @@ func (ct *Client) Do(ctx context.Context, req Request) (any, error) {
 	case `POST`, `PUT`, `PATCH`:
 		requestJSON, err := json.Marshal(req)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		// json.NewEncoder(os.Stdout).Encode(req)
 		hreq, err = http.NewRequestWithContext(ctx, method, url, bytes.NewReader(requestJSON))
 		if err != nil {
-			return nil, err
+			return err
 		}
 		hreq.Header.Set(`Content-Length`, strconv.Itoa(len(requestJSON)))
 		hreq.Header.Set(`Content-Type`, `application/json`)
 	default:
+		if req != nil {
+			return fmt.Errorf(`unexpected %#T content for method %q`, req, method)
+		}
 		var err error
 		hreq, err = http.NewRequestWithContext(ctx, method, url, nil)
 		if err != nil {
-			return nil, err
+			return err
+		}
+	}
+
+	for _, hook := range ct.requestHooks {
+		err := hook(hreq)
+		if err != nil {
+			return err
 		}
 	}
 
 	hrsp, err := http.DefaultClient.Do(hreq)
 	if err != nil {
-		return nil, err
+		return err
+	}
+	for i := len(ct.responseHooks) - 1; i >= 0; i-- {
+		err = ct.responseHooks[i](hrsp)
+		if err != nil {
+			return err
+		}
 	}
 	defer hrsp.Body.Close()
 
-	rep := req.OllamaResponse(hrsp.StatusCode)
-	if rep == nil {
-		return nil, fmt.Errorf(`%w in response to %q`, hrsp.Status, api)
+	if hrsp.StatusCode < 200 || hrsp.StatusCode > 299 {
+		content, _ := io.ReadAll(hrsp.Body)
+		return &Error{
+			URL:        url,
+			StatusCode: hrsp.StatusCode,
+			Status:     hrsp.Status,
+			Header:     hrsp.Header,
+			Content:    content,
+		}
 	}
-	err = json.NewDecoder(hrsp.Body).Decode(rep)
-	return rep, err
+
+	if rsp != nil {
+		err = json.NewDecoder(hrsp.Body).Decode(rsp)
+	}
+	return err
 }
 
-// A Request describes an Ollama request that can be delivered using the low level Do method of the client.
-type Request interface {
-	// OllamaAPI returns the method and API path + query to the Ollama API for this request.
-	// If the method is a "POST", "PUT" or "PATCH", the request will be sent as application/json content.
-	OllamaAPI() (method, api string)
-
-	// OllamaResponse returns an empty Ollama response structure associated with the specified status code.
-	OllamaResponse(status int) any
+type Error struct {
+	URL        string
+	StatusCode int
+	Status     string
+	Header     http.Header
+	Content    []byte
 }
+
+func (err *Error) Error() string { return err.Status }
 
 // hostURL tries to detect if the host is a URL or a network address and return an actual URL; it will return
 // an empty string if the host does not match either.

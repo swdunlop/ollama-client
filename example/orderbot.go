@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
+	"fmt"
 	"io"
 	"os"
 	"os/signal"
@@ -11,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rs/zerolog"
 	"github.com/swdunlop/ollama-client"
 	"github.com/swdunlop/ollama-client/chat"
 	"github.com/swdunlop/ollama-client/chat/tool"
@@ -20,6 +23,9 @@ import (
 )
 
 func main() {
+	flag.BoolVar(&trace, `trace`, false, `trace HTTP requests`)
+	flag.BoolVar(&trace, `json`, false, `trace HTTP requests`)
+	flag.Parse()
 	err := run()
 	if err != nil {
 		println(`!!`, err.Error())
@@ -30,6 +36,24 @@ func main() {
 func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
+
+	var options []ollama.Option
+	if trace {
+		var out io.Writer
+		if outputJSON {
+			out = os.Stderr
+		} else {
+			out = zerolog.ConsoleWriter{
+				Out:        os.Stderr,
+				TimeFormat: `2006-01-02 15:04:05`,
+			}
+		}
+		logger := zerolog.New(out).Level(zerolog.TraceLevel).With().Timestamp().Logger()
+		defer os.Stderr.Sync()
+
+		options = append(options, ollama.TraceZerolog(logger))
+	}
+	ctx = ollama.With(ctx, options...)
 
 	err := loadOrders()
 	if err != nil {
@@ -46,40 +70,33 @@ func run() error {
 		return err
 	}
 
-	options := []chat.Option{
+	ret, err := ollama.Chat(ctx,
 		chat.Model(`mistral-nemo:12b-instruct-2407-q8_0`),
 		chat.Temperature(0), // Do not imagine my food!
-		chat.System(`Assist the user with inquiries about product orders using the provided tools.` +
+		chat.System(`Assist the user with inquiries about product orders using the provided tools.`+
 			` Only use the tools provided, do not attempt to provide information that is not available.`,
 		),
-		chat.Tools(findOrdersTool),
+		chat.Toolkit(tk),
 		chat.User(strings.Join(os.Args[1:], " ")),
+	)
+
+	if err != nil {
+		return err
 	}
-	enc := json.NewEncoder(os.Stdout)
-	for {
-		ret, err := ollama.Chat(ctx,
-			options...,
-		)
-		if err != nil {
-			return err
-		}
-		enc.Encode(ret.Message)
-		for _, call := range ret.Message.ToolCalls {
-			ret, err := tk.Call(ctx, call)
-			if err != nil {
-				return err
-			}
-			enc.Encode(ret)
-			options = append(options, chat.Message(ret.Role, ret.Content))
-		}
-		if ret.Message.Content != "" {
-			println(ret.Message.Content)
-		}
-		if len(ret.Message.ToolCalls) == 0 {
-			return nil
+	if outputJSON {
+		if !trace {
+			os.Stdout.Sync()
+			return json.NewEncoder(os.Stdout).Encode(ret)
 		}
 	}
+	_, err = fmt.Println(ret.Message.Content)
+	return err
 }
+
+var (
+	trace      = false
+	outputJSON = false
+)
 
 func findOrders(ctx context.Context, q struct {
 	ID          tool.Optional[string] `json:"id"          type:"string"   use:"only return orders matching this ID"`
