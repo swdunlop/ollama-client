@@ -13,6 +13,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/swdunlop/ollama-client/chat"
+	"github.com/swdunlop/ollama-client/embed"
 )
 
 // With creates a new Ollama client or expands the previous one in a context.
@@ -51,6 +52,18 @@ func Chat(ctx context.Context, options ...chat.Option) (*chat.Response, error) {
 			req.Messages = append(req.Messages, msg)
 		}
 	}
+}
+
+// Embed returns a vector that describes the input in a dimensions understood by the model.  This can be used to identify similar inputs
+// or to find relevant inputs.
+func Embed(ctx context.Context, options ...embed.Option) (*embed.Response, error) {
+	req := newRequest[embed.Request](options...)
+	var rsp embed.Response
+	err := from(ctx).Do(ctx, &rsp, `POST`, req, `/api/embed`)
+	if err != nil {
+		return nil, err
+	}
+	return &rsp, nil
 }
 
 func newRequest[
